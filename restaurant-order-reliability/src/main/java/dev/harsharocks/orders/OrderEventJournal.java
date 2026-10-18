@@ -22,7 +22,8 @@ import java.util.Optional;
  * Single-process durable inbox for normalized order events.
  *
  * Records are checksummed and synced before the in-memory projection is updated.
- * Reopening the journal replays the same events, including stale events and duplicates,
+ * Reopening the journal replays all recorded events, including stale events and any
+ * duplicate records written by older versions,
  * so previously observed event IDs retain their deduplication semantics after restart.
  * An exclusive OS file lock prevents two local processes from writing concurrently.
  * This is a teaching example, not a replacement for a transactional database.
@@ -67,10 +68,16 @@ public final class OrderEventJournal implements AutoCloseable {
         this.lock = acquired;
     }
 
-    /** Appends and fsyncs the event before applying it; rejects writes after an I/O failure. */
+    /**
+     * Persists previously unseen event IDs before applying them. Exact retries and
+     * conflicting reuse of an event ID do not change state and need no new disk record.
+     * Rejects writes after an I/O failure.
+     */
     public synchronized ProcessingResult accept(OrderEvent event) throws IOException {
         ensureUsable();
         Objects.requireNonNull(event, "event must not be null");
+        Optional<ProcessingResult> duplicate = processor.alreadySeen(event);
+        if (duplicate.isPresent()) return duplicate.get();
         byte[] bytes = serialize(event);
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
         try {

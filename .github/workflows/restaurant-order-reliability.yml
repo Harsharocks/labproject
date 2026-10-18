@@ -27,3 +27,4 @@ jobs:
           javac -Xlint:all -d out src/main/java/dev/harsharocks/orders/*.java src/test/java/dev/harsharocks/orders/*.java
           java -cp out dev.harsharocks.orders.OrderEventProcessorTest
           java -cp out dev.harsharocks.orders.OrderEventJournalTest
+          java -cp out dev.harsharocks.orders.JournalDeduplicationTest

@@ -23,10 +23,10 @@ The core classes are pure Java without a framework, database, network credential
 
 Install a **JDK 21 or later** (for example Eclipse Temurin 21) and verify `java -version` and `javac -version` both work. Git is optional if you download the source directly. No Maven, Gradle or external libraries are needed for this increment.
 
-Clone:
+Clone the feature branch while the journal work is under review:
 
 ```sh
-git clone https://github.com/Harsharocks/labproject.git
+git clone --branch feature/order-event-journal https://github.com/Harsharocks/labproject.git
 cd labproject/restaurant-order-reliability
 ```
 
@@ -52,7 +52,7 @@ The example processes `OPEN`, then `PAID`, then a duplicate `OPEN`, then a delay
 
 ## Durable journal demo
 
-`OrderEventJournal` is an opt-in, single-machine event inbox. It appends a versioned, SHA-256-checksummed record and calls `FileChannel.force(true)` before updating in-memory state. On restart it replays the file, preserving order revisions and previously seen event IDs. An exclusive file lock prevents two local writers; corrupt or incomplete records stop startup rather than being silently ignored.
+`OrderEventJournal` is an opt-in, single-machine event inbox. For previously unseen event IDs, it appends a versioned, SHA-256-checksummed record and calls `FileChannel.force(true)` before updating in-memory state. On restart it replays the file, preserving order revisions and previously seen event IDs. An exclusive file lock prevents two local writers; corrupt or incomplete records stop startup rather than being silently ignored.
 
 Compile the main sources as shown above, then run this command **twice** using the same journal path:
 
@@ -62,7 +62,9 @@ java -cp out dev.harsharocks.orders.JournalDemo data/orders.journal
 
 First run: `OPEN` and `PAID` both return `APPLIED`. Second run: both return `DUPLICATE_EVENT` and the recovered order remains `PAID`, revision 2. The demo uses fictional IDs and amounts; `data/` is excluded by `.gitignore`. The same command works in PowerShell.
 
-This is not a distributed or tamper-proof event store. Checksums detect accidental damage, not malicious modification. Every delivery, including duplicates, is appended; journal growth and replay cost are unbounded. A failed write blocks further writes until the file is inspected and reopened. Do not share the file across hosts or use it for real payments. A transactional database inbox/outbox is the next production step.
+**Retry write amplification:** Exact duplicate deliveries and conflicting reuse of an already-seen event ID return immediately without another append or fsync. Unique IDs are persisted even when their updates are stale or conflict with an existing timestamp, so retries retain their idempotency semantics after restart. Older journal files containing redundant duplicate records still replay correctly. This reduces redundant disk writes during at-least-once delivery, but is not a throughput benchmark.
+
+This is not a distributed or tamper-proof event store. Checksums detect accidental damage, not malicious modification. Each distinct event ID consumes storage; journal growth and replay cost are unbounded. A failed write blocks further writes until the file is inspected and reopened. Do not share the file across hosts or use it for real payments. A transactional database inbox/outbox is the next production step.
 
 ## Run tests
 
@@ -70,21 +72,23 @@ This is not a distributed or tamper-proof event store. Checksums detect accident
 
 ```sh
 mkdir -p out
-javac -d out src/main/java/dev/harsharocks/orders/*.java src/test/java/dev/harsharocks/orders/*.java
+javac -Xlint:all -d out src/main/java/dev/harsharocks/orders/*.java src/test/java/dev/harsharocks/orders/*.java
 java -cp out dev.harsharocks.orders.OrderEventProcessorTest
 java -cp out dev.harsharocks.orders.OrderEventJournalTest
+java -cp out dev.harsharocks.orders.JournalDeduplicationTest
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
 New-Item -ItemType Directory -Force out | Out-Null
-javac -d out (Get-ChildItem src/main/java/dev/harsharocks/orders/*.java) (Get-ChildItem src/test/java/dev/harsharocks/orders/*.java)
+javac -Xlint:all -d out (Get-ChildItem src/main/java/dev/harsharocks/orders/*.java) (Get-ChildItem src/test/java/dev/harsharocks/orders/*.java)
 java -cp out dev.harsharocks.orders.OrderEventProcessorTest
 java -cp out dev.harsharocks.orders.OrderEventJournalTest
+java -cp out dev.harsharocks.orders.JournalDeduplicationTest
 ```
 
-The dependency-free tests cover duplicate and stale events, timestamp ties, tenant isolation, restart recovery, persisted rejected events, corrupted/truncated journals, file locking, invalid inputs, and concurrent appends. Both suites run in GitHub Actions.
+The dependency-free tests cover duplicate and stale events, timestamp ties, tenant isolation, restart recovery, persisted rejected events, corrupted/truncated journals, file locking, invalid inputs, and concurrent appends. The deduplication suite additionally checks that retries do not grow the journal, legacy files remain readable, distinct rejected events remain durable, and 100 concurrent retries produce one physical record. All three suites run in GitHub Actions.
 
 ## Limitations and tradeoffs
 
@@ -106,5 +110,6 @@ The dependency-free tests cover duplicate and stale events, timestamp ties, tena
 - [Toast orders webhook reference](https://doc.toasttab.com/doc/devguide/devOrdersWebhookRef.html)
 - [Toast webhook basics and message signing](https://doc.toasttab.com/doc/devguide/apiWebhookBasics.html)
 - [Toast webhook headers](https://doc.toasttab.com/doc/devguide/apiHttpHeaders.html)
+- [Toast webhook subscription checklist: idempotence using event GUIDs](https://doc.toasttab.com/doc/cookbook/apiWebhookUsageChecklist.html)
 
 All data in this project is fictional. This case study is an independently designed illustration of integration-engineering techniques.

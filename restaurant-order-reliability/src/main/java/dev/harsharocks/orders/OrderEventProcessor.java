@@ -21,16 +21,25 @@ public final class OrderEventProcessor {
     private final Map<OrderKey, OrderSnapshot> orders = new HashMap<>();
     private final Map<String, OrderEvent> seenEvents = new HashMap<>();
 
+    /**
+     * Checks a previously observed event ID without changing state. Used by the durable
+     * journal to skip a disk write for exact retries and conflicting ID reuse.
+     */
+    synchronized Optional<ProcessingResult> alreadySeen(OrderEvent event) {
+        Objects.requireNonNull(event, "event must not be null");
+        OrderEvent prior = seenEvents.get(event.eventId());
+        if (prior == null) return Optional.empty();
+        OrderKey key = new OrderKey(event.restaurantId(), event.orderId());
+        return Optional.of(new ProcessingResult(prior.equals(event)
+                ? Outcome.DUPLICATE_EVENT : Outcome.EVENT_ID_CONFLICT, orders.get(key)));
+    }
+
     public synchronized ProcessingResult accept(OrderEvent event) {
         Objects.requireNonNull(event, "event must not be null");
-        OrderEvent priorEvent = seenEvents.get(event.eventId());
+        Optional<ProcessingResult> duplicate = alreadySeen(event);
+        if (duplicate.isPresent()) return duplicate.get();
         OrderKey key = new OrderKey(event.restaurantId(), event.orderId());
         OrderSnapshot current = orders.get(key);
-
-        if (priorEvent != null) {
-            return new ProcessingResult(priorEvent.equals(event)
-                    ? Outcome.DUPLICATE_EVENT : Outcome.EVENT_ID_CONFLICT, current);
-        }
 
         // Record all valid event IDs, including stale/conflicting updates, to ensure
         // an identical retry has an idempotent outcome rather than repeated processing.
