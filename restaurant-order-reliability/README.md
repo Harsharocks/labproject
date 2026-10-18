@@ -17,7 +17,7 @@ The goal is to keep one deterministic, current order projection per restaurant/o
 - **Concurrency:** the acceptance operation is synchronized, so deduplication and projection happen atomically in a single JVM.
 - **Observability:** callers receive a typed outcome and the current state, including a local revision counter.
 
-The core classes are pure Java without a framework, database, network credentials or external dependencies. An HTTP adapter, durable event inbox and database transaction boundary would be the next production steps.
+The core classes are pure Java without a framework, database, network credentials or external dependencies. An HTTP adapter and database transaction boundary would be the next production steps. The optional `OrderEventJournal` supports single-process replay durability.
 
 ## Requirements and installation
 
@@ -50,6 +50,20 @@ java -cp out dev.harsharocks.orders.Demo
 
 The example processes `OPEN`, then `PAID`, then a duplicate `OPEN`, then a delayed `UPDATED`. Expected outcomes: `APPLIED`, `APPLIED`, `DUPLICATE_EVENT`, `STALE_EVENT`. The final state remains `PAID` at revision `2`.
 
+## Durable journal demo
+
+`OrderEventJournal` is an opt-in, single-machine event inbox. It appends a versioned, SHA-256-checksummed record and calls `FileChannel.force(true)` before updating in-memory state. On restart it replays the file, preserving order revisions and previously seen event IDs. An exclusive file lock prevents two local writers; corrupt or incomplete records stop startup rather than being silently ignored.
+
+Compile the main sources as shown above, then run this command **twice** using the same journal path:
+
+```sh
+java -cp out dev.harsharocks.orders.JournalDemo data/orders.journal
+```
+
+First run: `OPEN` and `PAID` both return `APPLIED`. Second run: both return `DUPLICATE_EVENT` and the recovered order remains `PAID`, revision 2. The demo uses fictional IDs and amounts; `data/` is excluded by `.gitignore`. The same command works in PowerShell.
+
+This is not a distributed or tamper-proof event store. Checksums detect accidental damage, not malicious modification. Every delivery, including duplicates, is appended; journal growth and replay cost are unbounded. A failed write blocks further writes until the file is inspected and reopened. Do not share the file across hosts or use it for real payments. A transactional database inbox/outbox is the next production step.
+
 ## Run tests
 
 ### macOS / Linux (Bash)
@@ -58,6 +72,7 @@ The example processes `OPEN`, then `PAID`, then a duplicate `OPEN`, then a delay
 mkdir -p out
 javac -d out src/main/java/dev/harsharocks/orders/*.java src/test/java/dev/harsharocks/orders/*.java
 java -cp out dev.harsharocks.orders.OrderEventProcessorTest
+java -cp out dev.harsharocks.orders.OrderEventJournalTest
 ```
 
 ### Windows (PowerShell)
@@ -66,13 +81,14 @@ java -cp out dev.harsharocks.orders.OrderEventProcessorTest
 New-Item -ItemType Directory -Force out | Out-Null
 javac -d out (Get-ChildItem src/main/java/dev/harsharocks/orders/*.java) (Get-ChildItem src/test/java/dev/harsharocks/orders/*.java)
 java -cp out dev.harsharocks.orders.OrderEventProcessorTest
+java -cp out dev.harsharocks.orders.OrderEventJournalTest
 ```
 
-The dependency-free test suite checks duplicates, stale updates, timestamp ties, event ID collisions, multi-restaurant isolation, invalid data and concurrent duplicate delivery (100 virtual threads). It exits non-zero on failure.
+The dependency-free tests cover duplicate and stale events, timestamp ties, tenant isolation, restart recovery, persisted rejected events, corrupted/truncated journals, file locking, invalid inputs, and concurrent appends. Both suites run in GitHub Actions.
 
 ## Limitations and tradeoffs
 
-- **In-memory only:** event deduplication and order projections disappear on process restart. Use a transactional database and a unique event-ID index for durability and multiple instances.
+- **Opt-in persistence:** `OrderEventProcessor` remains in-memory. `OrderEventJournal` replays a local file after restart, but cannot coordinate multiple hosts. Use a transactional database and unique event keys for production.
 - **Event time is not authoritative sequencing:** equal timestamps with differing snapshots need upstream sequence numbers, a version field or reconciliation against the authoritative API. A newer timestamp also assumes upstream timestamps reflect the canonical state order.
 - **No webhook endpoint or signing yet:** the demo models normalized events, not Toast payload parsing or authentication. A real integration must verify request signatures, limit request size, safely parse JSON and avoid storing sensitive customer information.
 - **No exactly-once external effects:** the processor only changes in-memory order state. Transactional outbox/inbox processing would be required before sending payments, emails or other side effects.
@@ -83,7 +99,7 @@ The dependency-free test suite checks duplicates, stale updates, timestamp ties,
 1. Add an HTTP JSON adapter with request validation and synthetic webhook payload fixtures.
 2. Persist event inbox and current order projection in PostgreSQL with atomic updates.
 3. Add an outbox for downstream fulfillment notifications and failure/retry testing.
-4. Publish a CI workflow and benchmark ordering and duplicate throughput.
+4. Benchmark ordering and duplicate throughput, and add journal checkpointing/compaction.
 
 ## Public references
 
